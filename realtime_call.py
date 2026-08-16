@@ -36,6 +36,9 @@ PORT = int(os.getenv("PORT", "8000"))
 MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-mini")
 VOICE = os.getenv("OPENAI_REALTIME_VOICE", "marin")
 MAX_CALL_SECONDS = int(os.getenv("MAX_CALL_SECONDS", "180"))
+# Require a meaningful quiet gap before handing the conversational floor over.
+OFFICE_VAD_SILENCE_MS = int(os.getenv("OFFICE_VAD_SILENCE_MS", "1000"))
+OFFICE_TURN_SETTLE_MS = int(os.getenv("OFFICE_TURN_SETTLE_MS", "900"))
 
 PATIENT_PROMPT = """
 You are Jamie Carter, a realistic patient calling a medical practice.
@@ -67,6 +70,16 @@ MENU_PHRASES = (
     "press 2",
 )
 
+# A provider greeting may be transcribed in the same VAD turn as the recorded
+# disclosure. Its presence makes the combined turn conversationally actionable.
+GREETING_PHRASES = (
+    "how may i help",
+    "how can i help",
+    "what can i help",
+    "thanks for calling",
+    "thank you for calling",
+)
+
 
 def should_answer_office(transcript: str, conversation_started: bool) -> bool:
     """Reject recorded menus and obvious fragments without harming real turns."""
@@ -77,7 +90,9 @@ def should_answer_office(transcript: str, conversation_started: bool) -> bool:
 
     # The opening disclosure is not a conversational turn.
     if not conversation_started and any(phrase in lowered for phrase in MENU_PHRASES):
-        return False
+        contains_greeting = any(phrase in lowered for phrase in GREETING_PHRASES)
+        if not contains_greeting:
+            return False
 
     # A one- or two-word fragment without sentence-ending punctuation (such as
     # "You're") is likely an interrupted office utterance. Short questions like
@@ -213,6 +228,9 @@ async def media_stream(signalwire_ws: WebSocket) -> None:
     patient_audio_playing = False
     conversation_started = False
     response_in_progress = False
+    office_turn_version = 0
+    office_is_speaking = False
+    pending_response_task: asyncio.Task | None = None
 
     try:
         async with websockets.connect(
@@ -242,7 +260,10 @@ async def media_stream(signalwire_ws: WebSocket) -> None:
                                 "type": "server_vad",
                                 "threshold": 0.5,
                                 "prefix_padding_ms": 300,
-                                "silence_duration_ms": 650,
+                                # Synthetic voices sometimes pause inside a
+                                # sentence. A longer silence threshold reduces
+                                # false end-of-turn detection.
+                                "silence_duration_ms": OFFICE_VAD_SILENCE_MS,
                                 # VAD still divides office speech into turns, but
                                 # the application decides which turns deserve an
                                 # answer after seeing their transcripts.
@@ -310,12 +331,54 @@ async def media_stream(signalwire_ws: WebSocket) -> None:
             async def openai_to_signalwire() -> None:
                 """Return bot audio and delegate transcript events to capture."""
                 nonlocal patient_audio_playing, conversation_started
-                nonlocal response_in_progress
+                nonlocal response_in_progress, office_turn_version
+                nonlocal office_is_speaking, pending_response_task
+
+                async def answer_after_quiet(transcript: str, version: int) -> None:
+                    """Create a response only if the office remains silent."""
+                    nonlocal patient_audio_playing, conversation_started
+                    nonlocal response_in_progress
+                    try:
+                        await asyncio.sleep(OFFICE_TURN_SETTLE_MS / 1000)
+                    except asyncio.CancelledError:
+                        return
+
+                    # Any newer speech-start event means the office reclaimed
+                    # the floor during the settling window.
+                    if version != office_turn_version or office_is_speaking:
+                        return
+                    if response_in_progress or patient_audio_playing:
+                        print(f"Office turn held because patient floor is busy: {transcript!r}")
+                        return
+
+                    conversation_started = True
+                    response_in_progress = True
+                    print(f"Office turn complete; creating patient response: {transcript!r}")
+                    await openai_ws.send(json.dumps({"type": "response.create"}))
+
                 async for raw in openai_ws:
                     event = json.loads(raw)
                     event_type = event.get("type")
-                    if event_type == "response.output_audio.delta" and stream_sid:
-                        patient_audio_playing = True
+                    if event_type == "input_audio_buffer.speech_started":
+                        # Cancel the pending response if the office resumes after
+                        # a pause. This is the core half-duplex floor control.
+                        office_turn_version += 1
+                        office_is_speaking = True
+                        if pending_response_task and not pending_response_task.done():
+                            pending_response_task.cancel()
+                            print("Office resumed speaking; pending patient response cancelled.")
+                        if response_in_progress and not patient_audio_playing:
+                            # The office reclaimed the floor while OpenAI was
+                            # generating but before any patient audio was sent.
+                            # Cancel safely; the next complete office turn will
+                            # trigger a fresh response.
+                            await openai_ws.send(json.dumps({"type": "response.cancel"}))
+                            patient_audio_buffers.clear()
+                            response_in_progress = False
+                            print("Office resumed speaking; generated patient reply cancelled.")
+                    elif event_type == "input_audio_buffer.speech_stopped":
+                        office_is_speaking = False
+                    elif event_type == "response.output_audio.delta" and stream_sid:
                         item_id = event.get("item_id")
                         if not item_id:
                             print("Cannot buffer patient audio: delta event had no item_id")
@@ -343,6 +406,9 @@ async def media_stream(signalwire_ws: WebSocket) -> None:
                             patient_audio_playing = False
                             continue
 
+                        # The complete office turn stayed quiet throughout model
+                        # generation. The patient may now take the floor.
+                        patient_audio_playing = True
                         # Sending one contiguous PCMU payload prevents transport
                         # gaps between Realtime deltas from triggering the other
                         # bot's end-of-speech detector mid-sentence.
@@ -376,9 +442,13 @@ async def media_stream(signalwire_ws: WebSocket) -> None:
                             print(f"Deferring office turn while response is active: {transcript!r}")
                             continue
 
-                        conversation_started = True
-                        response_in_progress = True
-                        await openai_ws.send(json.dumps({"type": "response.create"}))
+                        # Restart the settling timer for the newest complete
+                        # office utterance; only the latest turn may be answered.
+                        if pending_response_task and not pending_response_task.done():
+                            pending_response_task.cancel()
+                        pending_response_task = asyncio.create_task(
+                            answer_after_quiet(transcript, office_turn_version)
+                        )
                     elif event_type == "response.done":
                         response_in_progress = False
                         await capture.consume_realtime_event(event)
@@ -398,6 +468,8 @@ async def media_stream(signalwire_ws: WebSocket) -> None:
             )
             for task in pending:
                 task.cancel()
+            if pending_response_task and not pending_response_task.done():
+                pending_response_task.cancel()
     except WebSocketDisconnect:
         pass
     except Exception as exc:

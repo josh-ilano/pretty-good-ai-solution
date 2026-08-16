@@ -32,6 +32,9 @@ class CallCapture:
         self.recording_path = self.run_dir / "recording.mp3"
         self.destination = destination
         self._transcript_lock = asyncio.Lock()
+        # Patient text is held until SignalWire confirms its audio was played.
+        self._pending_patient_transcripts: dict[str, str] = {}
+        self._played_patient_items: set[str] = set()
         self.recording_ready = asyncio.Event()
 
     def initialize(self) -> None:
@@ -58,7 +61,7 @@ class CallCapture:
         print(line, end="", flush=True)
 
     async def consume_realtime_event(self, event: dict) -> None:
-        """Extract final caller and bot transcripts from OpenAI events."""
+        """Capture office speech and stage generated patient speech."""
         event_type = event.get("type")
         if event_type == "conversation.item.input_audio_transcription.completed":
             await self.append_transcript("OFFICE AGENT", event.get("transcript", ""))
@@ -66,7 +69,29 @@ class CallCapture:
             "response.output_audio_transcript.done",
             "response.audio_transcript.done",  # Retains compatibility with older events.
         }:
-            await self.append_transcript("PATIENT BOT", event.get("transcript", ""))
+            item_id = event.get("item_id")
+            transcript = event.get("transcript", "")
+            if not item_id:
+                # Without an item ID there is no reliable playback mark to match.
+                print("Patient transcript omitted: OpenAI event had no item_id")
+                return
+            self._pending_patient_transcripts[item_id] = transcript
+            await self._commit_patient_if_played(item_id)
+
+    async def confirm_patient_playback(self, item_id: str) -> None:
+        """Commit patient text after SignalWire acknowledges complete playback."""
+        self._played_patient_items.add(item_id)
+        await self._commit_patient_if_played(item_id)
+
+    async def _commit_patient_if_played(self, item_id: str) -> None:
+        """Write a patient turn once both transcript and playback are complete."""
+        if item_id not in self._played_patient_items:
+            return
+        transcript = self._pending_patient_transcripts.pop(item_id, None)
+        if transcript is None:
+            return
+        self._played_patient_items.discard(item_id)
+        await self.append_transcript("PATIENT BOT", transcript)
 
     def recording_options(self, public_base_url: str) -> dict:
         """Return SignalWire call options needed to produce a dual-channel MP3."""

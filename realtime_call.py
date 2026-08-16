@@ -8,9 +8,11 @@ Run:     python realtime_call.py
 """
 
 import asyncio
+import base64
 import json
 import os
 import ssl
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -38,13 +40,52 @@ MAX_CALL_SECONDS = int(os.getenv("MAX_CALL_SECONDS", "180"))
 PATIENT_PROMPT = """
 You are Jamie Carter, a realistic patient calling a medical practice.
 Your goal is to schedule a routine annual physical on a weekday morning.
-Speak naturally and briefly, one thought at a time. Listen carefully, answer
-follow-up questions coherently, and politely steer back to scheduling if needed.
+Always speak English. Ignore recorded disclosures and phone-menu instructions,
+including requests to press a number for another language. Do not answer until
+the live office agent greets you or asks how they can help.
+Speak naturally using complete thoughts. You may use more than one sentence
+when that is how a person would normally answer, but avoid unusually long pauses
+in the middle of a sentence. Listen carefully, answer follow-up questions
+coherently, and politely steer back to scheduling if needed.
 Do not say you are an AI or that this is a test. Your date of birth is July 4th,
 2000. Invent sensitive details such as address, insurance ID, or payment data.
 Once the appointment outcome is clear, thank the agent and say goodbye. The
 remote office agent speaks first, so wait for its greeting.
 """.strip()
+
+# Common phrases in the assessment number's recorded preamble. These are still
+# transcribed for an accurate record, but they should not trigger the patient.
+MENU_PHRASES = (
+    "call may be recorded",
+    "quality and training",
+    "para español",
+    "para espanol",
+    "oprima el",
+    "press one",
+    "press 1",
+    "press two",
+    "press 2",
+)
+
+
+def should_answer_office(transcript: str, conversation_started: bool) -> bool:
+    """Reject recorded menus and obvious fragments without harming real turns."""
+    cleaned = " ".join(transcript.split()).strip()
+    lowered = cleaned.casefold()
+    if not cleaned:
+        return False
+
+    # The opening disclosure is not a conversational turn.
+    if not conversation_started and any(phrase in lowered for phrase in MENU_PHRASES):
+        return False
+
+    # A one- or two-word fragment without sentence-ending punctuation (such as
+    # "You're") is likely an interrupted office utterance. Short questions like
+    # "Anything else?" remain valid because punctuation shows completion.
+    if len(cleaned.split()) <= 2 and cleaned[-1] not in ".?!":
+        return False
+
+    return True
 
 # The capture component owns this run's UUID folder, transcript, and recording.
 capture = CallCapture(Path(__file__).resolve().parent / "output", TEST_NUMBER)
@@ -161,6 +202,17 @@ async def media_stream(signalwire_ws: WebSocket) -> None:
     await signalwire_ws.accept()
     openai_url = f"wss://api.openai.com/v1/realtime?model={MODEL}"
     stream_sid: str | None = None
+    # Each mark maps SignalWire's playback acknowledgment to an OpenAI item.
+    pending_playback_marks: dict[str, str] = {}
+    # Realtime audio deltas can arrive with network or generation gaps. Buffer a
+    # complete utterance so those gaps do not sound like the end of the turn to
+    # the remote office bot's VAD.
+    patient_audio_buffers: dict[str, bytearray] = {}
+    # Inbound office audio is briefly retained while patient audio is playing.
+    buffered_inbound_audio: list[str] = []
+    patient_audio_playing = False
+    conversation_started = False
+    response_in_progress = False
 
     try:
         async with websockets.connect(
@@ -191,8 +243,13 @@ async def media_stream(signalwire_ws: WebSocket) -> None:
                                 "threshold": 0.5,
                                 "prefix_padding_ms": 300,
                                 "silence_duration_ms": 650,
-                                "create_response": True,
-                                "interrupt_response": True,
+                                # VAD still divides office speech into turns, but
+                                # the application decides which turns deserve an
+                                # answer after seeing their transcripts.
+                                "create_response": False,
+                                # The remote endpoint is another voice bot. Do not
+                                # let its early VAD response cancel our sentence.
+                                "interrupt_response": False,
                             },
                         },
                         "output": {
@@ -204,33 +261,129 @@ async def media_stream(signalwire_ws: WebSocket) -> None:
             }))
 
             async def signalwire_to_openai() -> None:
-                """Forward inbound telephone audio to OpenAI Realtime."""
-                nonlocal stream_sid
+                """Forward office audio and process playback acknowledgments."""
+                nonlocal stream_sid, patient_audio_playing
+
+                async def send_audio(payload: str) -> None:
+                    await openai_ws.send(json.dumps({
+                        "type": "input_audio_buffer.append",
+                        "audio": payload,
+                    }))
+
                 while True:
                     event = json.loads(await signalwire_ws.receive_text())
                     event_type = event.get("event")
                     if event_type == "start":
                         stream_sid = event["start"]["streamSid"]
                     elif event_type == "media":
-                        await openai_ws.send(json.dumps({
-                            "type": "input_audio_buffer.append",
-                            "audio": event["media"]["payload"],
-                        }))
+                        payload = event["media"]["payload"]
+                        if patient_audio_playing:
+                            # Preserve speech from an early-interrupting office bot
+                            # without letting it start a competing patient turn.
+                            buffered_inbound_audio.append(payload)
+                        else:
+                            await send_audio(payload)
+                    elif event_type == "mark":
+                        mark_name = event.get("mark", {}).get("name")
+                        item_id = pending_playback_marks.pop(mark_name, None)
+                        if item_id:
+                            print(f"Patient audio playback completed: {mark_name}")
+                            await capture.confirm_patient_playback(item_id)
+
+                        # No patient responses remain queued. Release any office
+                        # audio accumulated during playback in its original order.
+                        if not pending_playback_marks:
+                            patient_audio_playing = False
+                            queued = buffered_inbound_audio.copy()
+                            buffered_inbound_audio.clear()
+                            for payload in queued:
+                                await send_audio(payload)
                     elif event_type == "stop":
+                        if pending_playback_marks:
+                            names = ", ".join(pending_playback_marks)
+                            print(
+                                "SignalWire stream stopped before patient audio "
+                                f"finished playing; pending marks: {names}"
+                            )
                         return
 
             async def openai_to_signalwire() -> None:
                 """Return bot audio and delegate transcript events to capture."""
+                nonlocal patient_audio_playing, conversation_started
+                nonlocal response_in_progress
                 async for raw in openai_ws:
                     event = json.loads(raw)
                     event_type = event.get("type")
                     if event_type == "response.output_audio.delta" and stream_sid:
+                        patient_audio_playing = True
+                        item_id = event.get("item_id")
+                        if not item_id:
+                            print("Cannot buffer patient audio: delta event had no item_id")
+                            continue
+                        try:
+                            audio_bytes = base64.b64decode(event["delta"], validate=True)
+                        except (KeyError, ValueError) as exc:
+                            print(f"Invalid OpenAI audio delta: {exc}")
+                            continue
+                        patient_audio_buffers.setdefault(item_id, bytearray()).extend(
+                            audio_bytes
+                        )
+                    elif event_type in {
+                        "response.output_audio.done",
+                        "response.audio.done",  # Compatibility with older events.
+                    } and stream_sid:
+                        item_id = event.get("item_id")
+                        if not item_id:
+                            print("Cannot track patient playback: audio event had no item_id")
+                            continue
+
+                        audio = patient_audio_buffers.pop(item_id, None)
+                        if not audio:
+                            print(f"Cannot play patient response: no audio for {item_id}")
+                            patient_audio_playing = False
+                            continue
+
+                        # Sending one contiguous PCMU payload prevents transport
+                        # gaps between Realtime deltas from triggering the other
+                        # bot's end-of-speech detector mid-sentence.
                         await signalwire_ws.send_json({
                             "event": "media",
                             "streamSid": stream_sid,
-                            "media": {"payload": event["delta"]},
+                            "media": {
+                                "payload": base64.b64encode(audio).decode("ascii")
+                            },
                         })
+
+                        # SignalWire echoes this mark only after all previously
+                        # queued media has finished playing on the phone call.
+                        mark_name = f"patient-{uuid.uuid4()}"
+                        pending_playback_marks[mark_name] = item_id
+                        await signalwire_ws.send_json({
+                            "event": "mark",
+                            "streamSid": stream_sid,
+                            "mark": {"name": mark_name},
+                        })
+                        print(f"Waiting for patient audio playback: {mark_name}")
+                    elif event_type == "conversation.item.input_audio_transcription.completed":
+                        # Capture every office utterance, including ignored ones,
+                        # so the transcript continues to reflect the recording.
+                        await capture.consume_realtime_event(event)
+                        transcript = event.get("transcript", "")
+                        if not should_answer_office(transcript, conversation_started):
+                            print(f"Ignoring non-conversational office audio: {transcript!r}")
+                            continue
+                        if response_in_progress:
+                            print(f"Deferring office turn while response is active: {transcript!r}")
+                            continue
+
+                        conversation_started = True
+                        response_in_progress = True
+                        await openai_ws.send(json.dumps({"type": "response.create"}))
+                    elif event_type == "response.done":
+                        response_in_progress = False
+                        await capture.consume_realtime_event(event)
                     elif event_type == "error":
+                        response_in_progress = False
                         print("OpenAI Realtime error:", event.get("error", event))
                     else:
                         await capture.consume_realtime_event(event)

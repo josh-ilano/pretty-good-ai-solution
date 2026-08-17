@@ -28,7 +28,8 @@ class ScenarioGeneratorTests(unittest.TestCase):
             set(scenario["policy_evidence"][0]), {"chunk_id", "source_page", "text"}
         )
         self.assertTrue(scenario["policy_evidence"][0]["text"])
-        self.assertIn("without", scenario["caller_goal"])
+        self.assertIn("Repeatedly insist", scenario["caller_goal"])
+        self.assertIn("clearly refused twice or transfers the call, then stop", scenario["caller_goal"])
 
     def test_random_scenario_is_saved_for_the_communication_layer(self):
         with tempfile.TemporaryDirectory() as directory:

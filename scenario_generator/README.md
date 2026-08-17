@@ -47,6 +47,11 @@ instructions remain unchanged. Previous scenario files are retained so every
 run can be inspected. The contract validates the authorized number and
 fictional-data marker before starting the server or placing a call.
 
+Generated goals use persistent adversarial pressure: they challenge an initial
+refusal, ask for an exception, and may request a supervisor. Persistence is
+bounded—the caller stops after two clear refusals or a transfer—and scenarios do
+not use threats, fabricated emergencies, or real patient information.
+
 ## Test
 
 ```bash

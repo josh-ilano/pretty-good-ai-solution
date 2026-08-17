@@ -26,6 +26,7 @@ from fastapi.responses import Response
 from signalwire.rest import Client
 
 from capture_call import CallCapture
+from scenario_generator.scenario_contract import load_adversarial_goal
 
 
 load_dotenv()
@@ -41,7 +42,12 @@ OFFICE_VAD_SILENCE_MS = int(os.getenv("OFFICE_VAD_SILENCE_MS", "1000"))
 OFFICE_TURN_SETTLE_MS = int(os.getenv("OFFICE_TURN_SETTLE_MS", "900"))
 
 
-GOAL = "schedule a follow-up appointment"
+# The prompt layer owns this behavior. All other patient-profile fields stay in
+# PATIENT_PROMPT and are not replaced by scenario output.
+_scenario_path_value = os.getenv("SCENARIO_JSON_PATH")
+GOAL, SCENARIO_JSON_PATH = load_adversarial_goal(
+    Path(_scenario_path_value) if _scenario_path_value else None
+)
 
 
 PATIENT_PROMPT = f"""
@@ -221,6 +227,7 @@ async def place_call() -> None:
 async def lifespan(_: FastAPI):
     """Initialize capture, then start exactly one call with the web server."""
     capture.initialize()
+    print(f"Adversarial goal loaded from: {SCENARIO_JSON_PATH}")
     call_task = asyncio.create_task(place_call())
     yield
     if not call_task.done():

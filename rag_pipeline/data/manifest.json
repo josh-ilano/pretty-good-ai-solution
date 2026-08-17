@@ -1,0 +1,34 @@
+{
+  "document_id": "4737b46993f3673944d353f4f6e0bf6060b4529dc62ffbf26264e047ff98f1a9",
+  "source_path": "/Users/joshilano/Desktop/Pretty Good AI/output/pdf/medical_practice_call_workflows_rag_extract.pdf",
+  "source_file": "medical_practice_call_workflows_rag_extract.pdf",
+  "source_title": "Medical Practice Call Workflows - RAG Extract",
+  "source_pages": [
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    64,
+    65,
+    66,
+    67,
+    125
+  ],
+  "pdf_pages": 15,
+  "empty_pages": [],
+  "created_at": "2026-08-17T19:18:00+00:00",
+  "chunk_count": 30,
+  "total_chunk_words": 8039,
+  "max_words": 360,
+  "overlap_words": 60,
+  "outputs": {
+    "chunks": "chunks.jsonl",
+    "index": "policy_index.sqlite3"
+  }
+}

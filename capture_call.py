@@ -30,12 +30,17 @@ class CallCapture:
         self.run_dir = output_root / self.run_id
         self.transcript_path = self.run_dir / "transcript.txt"
         self.recording_path = self.run_dir / "recording.mp3"
+        self.error_log_path = self.run_dir / "error.log"
         self.destination = destination
         self._transcript_lock = asyncio.Lock()
         # Patient text is held until SignalWire confirms its audio was played.
         self._pending_patient_transcripts: dict[str, str] = {}
         self._played_patient_items: set[str] = set()
+        self._logged_failure_sids: set[str] = set()
         self.recording_ready = asyncio.Event()
+        # SignalWire can deliver the same status webhook more than once. Keep a
+        # strong reference to one download task so callbacks remain idempotent.
+        self._recording_download_task: asyncio.Task[None] | None = None
 
     def initialize(self) -> None:
         """Create the run folder and a human-readable transcript header."""
@@ -59,6 +64,29 @@ class CallCapture:
             with self.transcript_path.open("a", encoding="utf-8") as stream:
                 stream.write(line)
         print(line, end="", flush=True)
+
+    async def log_call_failure(self, fields: dict[str, str]) -> None:
+        """Persist a terminal call failure with provider diagnostics."""
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        status = fields.get("CallStatus", "unknown")
+        call_sid = fields.get("CallSid", "unknown")
+        if call_sid in self._logged_failure_sids:
+            return
+        self._logged_failure_sids.add(call_sid)
+        error_code = fields.get("ErrorCode", "not provided")
+        error_message = fields.get("ErrorMessage", "not provided")
+        entry = (
+            f"[{timestamp}] SignalWire call failed\n"
+            f"Status: {status}\n"
+            f"Call SID: {call_sid}\n"
+            f"Error code: {error_code}\n"
+            f"Error message: {error_message}\n\n"
+        )
+        async with self._transcript_lock:
+            with self.error_log_path.open("a", encoding="utf-8") as stream:
+                stream.write(entry)
+        print(entry, end="", flush=True)
+        print(f"Failure log saved: {self.error_log_path}", flush=True)
 
     async def consume_realtime_event(self, event: dict) -> None:
         """Capture office speech and stage generated patient speech."""
@@ -124,6 +152,37 @@ class CallCapture:
         """Use certifi so downloads work with the project's Python installation."""
         return ssl.create_default_context(cafile=certifi.where())
 
+    async def _download_recording_with_retry(self, recording_url: str) -> None:
+        """Wait for SignalWire's completed recording to become downloadable."""
+        await asyncio.sleep(3)
+
+        attempts = 5
+        for attempt in range(1, attempts + 1):
+            try:
+                # urlopen is blocking, so run it outside FastAPI's event loop.
+                await asyncio.to_thread(self._download_recording, recording_url)
+                self.recording_ready.set()
+                print(f"Recording saved: {self.recording_path}")
+                print(f"Transcript saved: {self.transcript_path}")
+                print("Artifacts ready. You may now stop the script with Ctrl+C.")
+                return
+            except Exception as exc:
+                if attempt == attempts:
+                    print(
+                        f"Recording download failed after {attempts} attempts: {exc}"
+                    )
+                    return
+
+                # A completed webhook can precede availability of the media URL
+                # by a few seconds. Retry here instead of asking SignalWire to
+                # retry the entire webhook by returning an HTTP error.
+                delay = min(2 ** (attempt - 1), 10)
+                print(
+                    f"Recording is not downloadable yet ({exc}); "
+                    f"retrying in {delay}s..."
+                )
+                await asyncio.sleep(delay)
+
     def _download_recording(self, recording_url: str) -> None:
         """Download the completed SignalWire recording into this run's folder."""
         url = recording_url if recording_url.lower().endswith(".mp3") else recording_url + ".mp3"
@@ -155,8 +214,11 @@ class CallCapture:
         @router.post("/call-status")
         async def call_status(request: Request) -> Response:
             fields = await self._webhook_fields(request)
-            if fields.get("CallStatus") == "completed":
+            status = fields.get("CallStatus")
+            if status == "completed":
                 print("Call completed. Waiting for SignalWire to finish the recording...")
+            elif status in {"failed", "canceled", "busy", "no-answer"}:
+                await self.log_call_failure(fields)
             return Response(status_code=204)
 
         @router.post("/recording-status")
@@ -169,16 +231,11 @@ class CallCapture:
             if not recording_url:
                 return Response(status_code=204)
 
-            try:
-                # urlopen is blocking, so run it outside FastAPI's event loop.
-                await asyncio.to_thread(self._download_recording, recording_url)
-                self.recording_ready.set()
-                print(f"Recording saved: {self.recording_path}")
-                print(f"Transcript saved: {self.transcript_path}")
-                print("Artifacts ready. You may now stop the script with Ctrl+C.")
-            except Exception as exc:
-                print(f"Recording download failed: {exc}")
-                return Response(status_code=500)
+            if self._recording_download_task is None:
+                self._recording_download_task = asyncio.create_task(
+                    self._download_recording_with_retry(recording_url)
+                )
+
             return Response(status_code=204)
 
         return router

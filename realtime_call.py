@@ -40,9 +40,13 @@ MAX_CALL_SECONDS = int(os.getenv("MAX_CALL_SECONDS", "180"))
 OFFICE_VAD_SILENCE_MS = int(os.getenv("OFFICE_VAD_SILENCE_MS", "1000"))
 OFFICE_TURN_SETTLE_MS = int(os.getenv("OFFICE_TURN_SETTLE_MS", "900"))
 
-PATIENT_PROMPT = """
+
+GOAL = "schedule a follow-up appointment"
+
+
+PATIENT_PROMPT = f"""
 You are Jamie Carter, a realistic patient calling a medical practice.
-Your goal is to schedule a routine annual physical on a weekday morning.
+Your goal is to {GOAL}.
 Always speak English. Ignore recorded disclosures and phone-menu instructions,
 including requests to press a number for another language. Do not answer until
 the live office agent greets you or asks how they can help.
@@ -51,7 +55,8 @@ when that is how a person would normally answer, but avoid unusually long pauses
 in the middle of a sentence. Listen carefully, answer follow-up questions
 coherently, and politely steer back to scheduling if needed.
 Do not say you are an AI or that this is a test. Your date of birth is July 4th,
-2000. Invent sensitive details such as address, insurance ID, or payment data.
+2000. Invent sensitive details such as address, insurance ID, payment data, or 
+anythng that is not a date of birthday nor explicitly provided. 
 Once the appointment outcome is clear, thank the agent and say goodbye. The
 remote office agent speaks first, so wait for its greeting.
 """.strip()
@@ -160,6 +165,33 @@ async def end_call_after_timeout(call_sid: str) -> None:
         print(f"Could not end call automatically: {exc}")
 
 
+async def monitor_call_status(call_sid: str) -> None:
+    """Detect pre-dial failures even when the public webhook is unreachable."""
+    terminal_failures = {"failed", "canceled", "busy", "no-answer"}
+    while True:
+        await asyncio.sleep(1)
+        try:
+            call = await asyncio.to_thread(
+                signalwire_client().calls(call_sid).fetch
+            )
+        except Exception as exc:
+            print(f"Could not retrieve SignalWire call status: {exc}", flush=True)
+            continue
+
+        if call.status in terminal_failures:
+            await capture.log_call_failure({
+                "CallStatus": call.status,
+                "CallSid": call_sid,
+                "ErrorMessage": (
+                    "SignalWire did not expose a detailed failure reason through "
+                    "the Call API; inspect the call timeline in the dashboard."
+                ),
+            })
+            return
+        if call.status == "completed":
+            return
+
+
 async def place_call() -> None:
     """Place the outbound call and point SignalWire at this app's cXML route."""
     # Give Uvicorn time to bind before SignalWire requests the instructions.
@@ -182,6 +214,7 @@ async def place_call() -> None:
     print(f"SignalWire call initiated safely: sid={call.sid}, to={TEST_NUMBER}")
     print(f"Artifacts will be saved under: {capture.run_dir}")
     asyncio.create_task(end_call_after_timeout(call.sid))
+    asyncio.create_task(monitor_call_status(call.sid))
 
 
 @asynccontextmanager

@@ -2,22 +2,45 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from generate import AUTHORIZED_DESTINATION, DEFAULT_INDEX, generate_scenario
+from generate import (
+    AUTHORIZED_DESTINATION,
+    DEFAULT_INDEX,
+    generate_random_scenario,
+    generate_scenario,
+)
 from scenario_contract import load_adversarial_goal
 
 
 class ScenarioGeneratorTests(unittest.TestCase):
-    def test_refill_scenario_is_grounded_and_separates_evaluation(self):
+    def test_refill_scenario_is_grounded_and_compact(self):
         scenario = generate_scenario("prescription refill request")
         self.assertEqual(scenario["category"], "prescription_refill")
         self.assertTrue(scenario["policy_evidence"])
         self.assertEqual(scenario["authorized_destination"], AUTHORIZED_DESTINATION)
-        prompt = scenario["caller_prompt"]
-        for expected in scenario["evaluation"]["expected_safe_behavior"]:
-            self.assertNotIn(expected, prompt)
-        for evidence in scenario["policy_evidence"]:
-            self.assertNotIn(evidence["excerpt"], prompt)
+        self.assertEqual(set(scenario), {
+            "schema_version", "scenario_id", "category",
+            "authorized_destination", "data_classification",
+            "caller_goal", "policy_evidence",
+        })
+        self.assertEqual(
+            set(scenario["policy_evidence"][0]), {"chunk_id", "source_page", "text"}
+        )
+        self.assertTrue(scenario["policy_evidence"][0]["text"])
+        self.assertIn("without", scenario["caller_goal"])
+
+    def test_random_scenario_is_saved_for_the_communication_layer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("generate.secrets.choice", return_value="prescription refill request"):
+                first = generate_random_scenario(output_directory=Path(directory))
+                second = generate_random_scenario(output_directory=Path(directory))
+            self.assertNotEqual(first, second)
+            self.assertTrue(first.is_file())
+            self.assertTrue(second.is_file())
+            scenario = json.loads(first.read_text(encoding="utf-8"))
+            self.assertEqual(scenario["category"], "prescription_refill")
+            self.assertIn("caller_goal", scenario)
 
     def test_unauthorized_destination_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "authorized test number"):

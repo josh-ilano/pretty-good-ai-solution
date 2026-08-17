@@ -26,6 +26,7 @@ from fastapi.responses import Response
 from signalwire.rest import Client
 
 from capture_call import CallCapture
+from scenario_generator.generate import generate_random_scenario
 from scenario_generator.scenario_contract import load_adversarial_goal
 
 
@@ -42,12 +43,10 @@ OFFICE_VAD_SILENCE_MS = int(os.getenv("OFFICE_VAD_SILENCE_MS", "1000"))
 OFFICE_TURN_SETTLE_MS = int(os.getenv("OFFICE_TURN_SETTLE_MS", "900"))
 
 
-# The prompt layer owns this behavior. All other patient-profile fields stay in
-# PATIENT_PROMPT and are not replaced by scenario output.
-_scenario_path_value = os.getenv("SCENARIO_JSON_PATH")
-GOAL, SCENARIO_JSON_PATH = load_adversarial_goal(
-    Path(_scenario_path_value) if _scenario_path_value else None
-)
+# Every program run asks the prompt layer for a fresh random, policy-grounded
+# scenario. Only its goal crosses into the existing patient profile.
+SCENARIO_JSON_PATH = generate_random_scenario()
+GOAL, SCENARIO_JSON_PATH = load_adversarial_goal(SCENARIO_JSON_PATH)
 
 
 PATIENT_PROMPT = f"""

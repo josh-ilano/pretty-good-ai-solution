@@ -44,3 +44,37 @@ def load_adversarial_goal(path: Path | None = None) -> tuple[str, Path]:
     if not isinstance(goal, str) or not goal.strip():
         raise ValueError("Scenario must contain a non-empty caller_goal")
     return " ".join(goal.split()), scenario_path
+
+
+def load_patient_prompt(path: Path) -> tuple[str, Path]:
+    """Return a validated complete patient-prompt replacement."""
+    scenario_path = path.expanduser().resolve()
+    if not scenario_path.is_file():
+        raise FileNotFoundError(f"Scenario JSON not found: {scenario_path}")
+    try:
+        scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid scenario JSON in {scenario_path}: {exc}") from exc
+    if not isinstance(scenario, dict):
+        raise ValueError("Scenario JSON must contain an object")
+    if scenario.get("authorized_destination") != AUTHORIZED_DESTINATION:
+        raise ValueError(
+            f"Scenario destination must be {AUTHORIZED_DESTINATION}; refusing to continue"
+        )
+    if scenario.get("data_classification") != "fictional_test_data_only":
+        raise ValueError("Scenario must be marked fictional_test_data_only")
+    prompt = scenario.get("patient_prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("Scenario must contain a non-empty patient_prompt")
+    return prompt.strip(), scenario_path
+
+
+def read_patient_prompt_file(path: Path) -> str:
+    """Read and validate a multiline patient prompt from a UTF-8 text file."""
+    prompt_path = path.expanduser().resolve()
+    if not prompt_path.is_file():
+        raise FileNotFoundError(f"Patient prompt file not found: {prompt_path}")
+    prompt = prompt_path.read_text(encoding="utf-8").strip()
+    if not prompt:
+        raise ValueError(f"Patient prompt file is empty: {prompt_path}")
+    return prompt

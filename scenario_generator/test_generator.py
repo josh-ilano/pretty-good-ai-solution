@@ -7,10 +7,15 @@ from unittest.mock import patch
 from generate import (
     AUTHORIZED_DESTINATION,
     DEFAULT_INDEX,
+    generate_manual_patient_prompt,
     generate_random_scenario,
     generate_scenario,
 )
-from scenario_contract import load_adversarial_goal
+from scenario_contract import (
+    load_adversarial_goal,
+    load_patient_prompt,
+    read_patient_prompt_file,
+)
 
 
 class ScenarioGeneratorTests(unittest.TestCase):
@@ -42,6 +47,38 @@ class ScenarioGeneratorTests(unittest.TestCase):
             scenario = json.loads(first.read_text(encoding="utf-8"))
             self.assertEqual(scenario["category"], "prescription_refill")
             self.assertIn("caller_goal", scenario)
+
+    def test_complete_manual_patient_prompt_round_trips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            supplied = "You are a fictional caller. Ask twice, then stop.\nWait for a greeting."
+            saved = generate_manual_patient_prompt(
+                supplied, output_directory=Path(directory)
+            )
+            loaded, loaded_path = load_patient_prompt(saved)
+            self.assertEqual(loaded, supplied)
+            self.assertEqual(loaded_path, saved)
+            scenario = json.loads(saved.read_text(encoding="utf-8"))
+            self.assertEqual(scenario["category"], "manual_patient_prompt")
+            self.assertNotIn("caller_goal", scenario)
+
+    def test_multiline_patient_prompt_file_is_loaded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "patient-prompt.txt"
+            path.write_text(
+                "You are a fictional caller.\n\nWait for the greeting.\nAsk once.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                read_patient_prompt_file(path),
+                "You are a fictional caller.\n\nWait for the greeting.\nAsk once.",
+            )
+
+    def test_empty_patient_prompt_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "patient-prompt.txt"
+            path.write_text("  \n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "is empty"):
+                read_patient_prompt_file(path)
 
     def test_unauthorized_destination_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "authorized test number"):

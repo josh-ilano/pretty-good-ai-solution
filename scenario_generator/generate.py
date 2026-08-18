@@ -231,6 +231,35 @@ def generate_random_scenario(
     return save_scenario(scenario, output)
 
 
+def generate_manual_patient_prompt(
+    patient_prompt: str,
+    output_directory: Path = DEFAULT_OUTPUT,
+    destination: str = AUTHORIZED_DESTINATION,
+) -> Path:
+    """Persist a complete user-authored replacement for PATIENT_PROMPT."""
+    cleaned_prompt = patient_prompt.strip()
+    if not cleaned_prompt:
+        raise ValueError("Manual patient prompt cannot be empty")
+    if len(cleaned_prompt) > 12000:
+        raise ValueError("Manual patient prompt cannot exceed 12000 characters")
+    if destination != AUTHORIZED_DESTINATION:
+        raise ValueError(
+            f"Destination must be the authorized test number {AUTHORIZED_DESTINATION}"
+        )
+
+    scenario = {
+        "schema_version": "1.0",
+        "scenario_id": secrets.token_hex(6),
+        "category": "manual_patient_prompt",
+        "authorized_destination": destination,
+        "data_classification": "fictional_test_data_only",
+        "patient_prompt": cleaned_prompt,
+        "policy_evidence": [],
+    }
+    output = output_directory / f"manual-prompt-{scenario['scenario_id']}.json"
+    return save_scenario(scenario, output)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("topic", nargs="?", help="Policy behavior to test; omit for random")

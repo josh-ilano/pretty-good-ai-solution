@@ -33,13 +33,39 @@ It requires no model API and uses only Python's standard library.
 
 ## Communication-layer integration
 
-Running the communication layer automatically generates a random,
-policy-grounded scenario and saves it under a unique category-and-ID filename in
-`scenario_generator/output/`:
+Running the communication layer loads the default multiline prompt from
+`input/patient_prompt_default.txt`:
 
 ```bash
-python realtime_call.py
+python3 realtime_call.py
 ```
+
+For a multiline prompt, copy the included example, edit it in any text editor,
+and pass the file when starting the call:
+
+```bash
+cp input/patient_prompt.txt.example input/patient_prompt.txt
+python3 realtime_call.py --patient-prompt-file input/patient_prompt.txt
+```
+
+The prompt file is read as UTF-8 and may contain normal paragraphs and line
+breaks. `--patient-prompt-file` replaces the entire `PATIENT_PROMPT`, including
+the patient identity and all conversation instructions.
+
+For a short inline replacement, use:
+
+```bash
+python3 realtime_call.py --patient-prompt \
+  "You are a fictional caller. Wait for a greeting, make the test request, and stop after two clear refusals."
+```
+
+To configure a persistent file in `.env`, set
+`MANUAL_PATIENT_PROMPT_FILE=input/patient_prompt.txt`. The existing
+`MANUAL_PATIENT_PROMPT` variable remains available for inline text, but the two
+environment variables cannot be set together.
+Full replacements are saved as unique `manual-prompt-<scenario_id>.json` files.
+A full replacement removes all built-in profile and stopping instructions, so
+those must be included in the supplied prompt when desired.
 
 `realtime_call.py` loads only that JSON's `caller_goal` into its existing
 `PATIENT_PROMPT`. The established patient identity and all other prompt

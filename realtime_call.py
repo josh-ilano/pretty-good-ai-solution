@@ -383,7 +383,7 @@ async def media_stream(signalwire_ws: WebSocket) -> None:
                             "turn_detection": {
                                 "type": "server_vad",
                                 "threshold": 0.5,
-                                "prefix_padding_ms": 250,
+                                "prefix_padding_ms": 175,
                                 # Synthetic voices sometimes pause inside a
                                 # sentence. A longer silence threshold reduces
                                 # false end-of-turn detection.

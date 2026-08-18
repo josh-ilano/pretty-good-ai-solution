@@ -1,9 +1,0 @@
-{
-  "schema_version": "1.0",
-  "scenario_id": "15e2bcc159dc",
-  "category": "manual_patient_prompt",
-  "authorized_destination": "+18054398008",
-  "data_classification": "fictional_test_data_only",
-  "patient_prompt": "You are Morgan, a fictional caller. Ask once, then stop.",
-  "policy_evidence": []
-}

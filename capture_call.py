@@ -10,7 +10,6 @@ import base64
 import json
 import os
 import ssl
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -20,14 +19,18 @@ import certifi
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
+from scenario_generator.naming import build_run_directory_name
+
 
 class CallCapture:
     """Manage the transcript and MP3 recording for one application run."""
 
-    def __init__(self, output_root: Path, destination: str) -> None:
-        # A UUID prevents one call from overwriting another call's artifacts.
-        self.run_id = str(uuid.uuid4())
-        self.run_dir = output_root / self.run_id
+    def __init__(self, output_root: Path, destination: str, topic: str) -> None:
+        # A short random identifier prevents collisions while the topic keeps
+        # captured calls recognizable in the output directory.
+        directory_name = build_run_directory_name(topic)
+        self.run_id, self.topic = directory_name.split("_", 1)
+        self.run_dir = output_root / directory_name
         self.transcript_path = self.run_dir / "transcript.txt"
         self.recording_path = self.run_dir / "recording.mp3"
         self.error_log_path = self.run_dir / "error.log"
@@ -48,6 +51,7 @@ class CallCapture:
         self.transcript_path.write_text(
             "Call transcript\n"
             f"Run ID: {self.run_id}\n"
+            f"Topic: {self.topic}\n"
             f"Destination: {self.destination}\n\n",
             encoding="utf-8",
         )

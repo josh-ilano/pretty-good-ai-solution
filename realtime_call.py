@@ -12,6 +12,7 @@ import asyncio
 import base64
 import json
 import os
+import secrets
 import ssl
 import uuid
 from contextlib import asynccontextmanager
@@ -27,7 +28,15 @@ from fastapi.responses import Response
 from signalwire.rest import Client
 
 from capture_call import CallCapture
-from scenario_generator.generate import generate_manual_patient_prompt
+from scenario_generator.generate import (
+    AUTHORIZED_DESTINATION,
+    DEFAULT_INDEX,
+    DEFAULT_OUTPUT,
+    RANDOM_TOPICS,
+    generate_manual_patient_prompt,
+    generate_scenario,
+    save_scenario,
+)
 from scenario_generator.scenario_contract import (
     load_patient_prompt,
     read_patient_prompt_file,
@@ -50,12 +59,17 @@ DEFAULT_PATIENT_PROMPT_FILE = (
 )
 
 
-def runtime_prompt_override() -> str | None:
-    """Read the optional full-prompt override while tolerating importer arguments."""
+def runtime_options() -> argparse.Namespace:
+    """Parse RAG and manual execution options while tolerating importer arguments."""
     parser = argparse.ArgumentParser(
-        description="Place a guarded test call with an optional patient prompt."
+        description="Place a guarded RAG or manual patient test call."
     )
     group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--rag",
+        action="store_true",
+        help="Generate and use a random policy-grounded RAG scenario",
+    )
     group.add_argument(
         "--patient-prompt",
         help="Complete replacement for PATIENT_PROMPT",
@@ -65,7 +79,26 @@ def runtime_prompt_override() -> str | None:
         type=Path,
         help="Path to a UTF-8 text file containing the complete PATIENT_PROMPT",
     )
+    parser.add_argument(
+        "--rag-index",
+        type=Path,
+        default=DEFAULT_INDEX,
+        help="SQLite policy index used with --rag",
+    )
+    parser.add_argument(
+        "--rag-evidence-limit",
+        type=int,
+        default=3,
+        help="Number of policy chunks to retrieve with --rag (1-10)",
+    )
     args, _ = parser.parse_known_args()
+    if not 1 <= args.rag_evidence_limit <= 10:
+        parser.error("--rag-evidence-limit must be between 1 and 10")
+    return args
+
+
+def manual_prompt_override(args: argparse.Namespace) -> str | None:
+    """Resolve a manual full-prompt override from CLI or environment."""
     if args.patient_prompt:
         return args.patient_prompt
     if args.patient_prompt_file:
@@ -82,12 +115,37 @@ def runtime_prompt_override() -> str | None:
     return env_prompt
 
 
-# Without an explicit override, load the editable default prompt from disk.
-_patient_prompt = runtime_prompt_override() or read_patient_prompt_file(
-    DEFAULT_PATIENT_PROMPT_FILE
+_runtime_options = runtime_options()
+if _runtime_options.rag:
+    _rag_topic = secrets.choice(RANDOM_TOPICS)
+    print(f"Random RAG test selected: {_rag_topic}", flush=True)
+    _rag_scenario = generate_scenario(
+        _rag_topic,
+        index=_runtime_options.rag_index,
+        destination=AUTHORIZED_DESTINATION,
+        evidence_limit=_runtime_options.rag_evidence_limit,
+    )
+    SCENARIO_JSON_PATH = save_scenario(
+        _rag_scenario,
+        DEFAULT_OUTPUT
+        / f"{_rag_scenario['category']}-{_rag_scenario['scenario_id']}.json",
+    )
+    PATIENT_PROMPT, SCENARIO_JSON_PATH = load_patient_prompt(SCENARIO_JSON_PATH)
+    print(f"RAG scenario saved: {SCENARIO_JSON_PATH}", flush=True)
+else:
+    # Without an explicit manual override, load the editable default prompt.
+    _patient_prompt = manual_prompt_override(
+        _runtime_options
+    ) or read_patient_prompt_file(DEFAULT_PATIENT_PROMPT_FILE)
+    SCENARIO_JSON_PATH = generate_manual_patient_prompt(_patient_prompt)
+    PATIENT_PROMPT, SCENARIO_JSON_PATH = load_patient_prompt(SCENARIO_JSON_PATH)
+
+_scenario_record = json.loads(SCENARIO_JSON_PATH.read_text(encoding="utf-8"))
+SCENARIO_TOPIC = str(
+    _scenario_record.get("test_topic")
+    or _scenario_record.get("category")
+    or "scenario"
 )
-SCENARIO_JSON_PATH = generate_manual_patient_prompt(_patient_prompt)
-PATIENT_PROMPT, SCENARIO_JSON_PATH = load_patient_prompt(SCENARIO_JSON_PATH)
 
 # Common phrases in the assessment number's recorded preamble. These are still
 # transcribed for an accurate record, but they should not trigger the patient.
@@ -136,7 +194,11 @@ def should_answer_office(transcript: str, conversation_started: bool) -> bool:
     return True
 
 # The capture component owns this run's UUID folder, transcript, and recording.
-capture = CallCapture(Path(__file__).resolve().parent / "output", TEST_NUMBER)
+capture = CallCapture(
+    Path(__file__).resolve().parent / "output",
+    TEST_NUMBER,
+    SCENARIO_TOPIC,
+)
 
 
 def required_env(name: str) -> str:
@@ -321,7 +383,7 @@ async def media_stream(signalwire_ws: WebSocket) -> None:
                             "turn_detection": {
                                 "type": "server_vad",
                                 "threshold": 0.5,
-                                "prefix_padding_ms": 300,
+                                "prefix_padding_ms": 250,
                                 # Synthetic voices sometimes pause inside a
                                 # sentence. A longer silence threshold reduces
                                 # false end-of-turn detection.

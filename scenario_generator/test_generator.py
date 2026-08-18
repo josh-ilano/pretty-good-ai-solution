@@ -7,6 +7,8 @@ from unittest.mock import patch
 from generate import (
     AUTHORIZED_DESTINATION,
     DEFAULT_INDEX,
+    DEFAULT_OUTPUT,
+    RANDOM_TOPICS,
     generate_manual_patient_prompt,
     generate_random_scenario,
     generate_scenario,
@@ -16,25 +18,80 @@ from scenario_contract import (
     load_patient_prompt,
     read_patient_prompt_file,
 )
+from naming import build_run_directory_name
 
 
 class ScenarioGeneratorTests(unittest.TestCase):
+    def test_run_directory_name_uses_short_id_and_readable_safe_topic(self):
+        name = build_run_directory_name(
+            "Authorization/referral status: approval?",
+            identifier="a1b2c3d4",
+        )
+        self.assertEqual(
+            name,
+            "a1b2c3d4_Authorization_referral_status_approval",
+        )
+
+    def test_run_directory_topic_has_a_bounded_length(self):
+        name = build_run_directory_name("topic " * 100, identifier="12345678")
+        identifier, topic = name.split("_", 1)
+        self.assertEqual(identifier, "12345678")
+        self.assertLessEqual(len(topic), 80)
+
+    def test_default_scenario_destination_is_repository_input(self):
+        self.assertEqual(DEFAULT_OUTPUT, Path(__file__).resolve().parents[1] / "input")
+
+    def test_every_extracted_scenario_topic_generates_a_specialized_profile(self):
+        expected_categories = {
+            "patient_registration",
+            "appointment_change",
+            "payment_policy",
+            "late_arrival_no_show",
+            "directions",
+            "general_policy",
+            "clinical_question",
+            "results_or_clinical_advice",
+            "prescription_refill",
+            "authorization_referral",
+            "formulary_pharmacy",
+            "repeat_caller",
+            "privacy_access",
+            "privacy_complaint",
+            "notice_of_privacy_practices",
+        }
+        generated_categories = {
+            generate_scenario(topic)["category"] for topic in RANDOM_TOPICS
+        }
+        self.assertEqual(generated_categories, expected_categories)
+
     def test_refill_scenario_is_grounded_and_compact(self):
         scenario = generate_scenario("prescription refill request")
         self.assertEqual(scenario["category"], "prescription_refill")
         self.assertTrue(scenario["policy_evidence"])
         self.assertEqual(scenario["authorized_destination"], AUTHORIZED_DESTINATION)
         self.assertEqual(set(scenario), {
-            "schema_version", "scenario_id", "category",
+            "schema_version", "scenario_id", "category", "test_topic",
             "authorized_destination", "data_classification",
-            "caller_goal", "policy_evidence",
+            "patient_prompt", "violation_attempt", "expected_safe_behavior",
+            "failure_conditions", "policy_evidence",
         })
         self.assertEqual(
             set(scenario["policy_evidence"][0]), {"chunk_id", "source_page", "text"}
         )
         self.assertTrue(scenario["policy_evidence"][0]["text"])
-        self.assertIn("Repeatedly insist", scenario["caller_goal"])
-        self.assertIn("clearly refused twice or transfers the call, then stop", scenario["caller_goal"])
+        self.assertTrue(scenario["patient_prompt"])
+        self.assertIn("Make at most two polite attempts", scenario["patient_prompt"])
+        self.assertIn("Use only fictional information", scenario["patient_prompt"])
+        self.assertTrue(scenario["expected_safe_behavior"])
+        self.assertTrue(scenario["failure_conditions"])
+        self.assertTrue(all(
+            isinstance(item, str) and item.strip()
+            for item in scenario["expected_safe_behavior"]
+        ))
+        self.assertTrue(all(
+            isinstance(item, str) and item.strip()
+            for item in scenario["failure_conditions"]
+        ))
 
     def test_random_scenario_is_saved_for_the_communication_layer(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -46,7 +103,9 @@ class ScenarioGeneratorTests(unittest.TestCase):
             self.assertTrue(second.is_file())
             scenario = json.loads(first.read_text(encoding="utf-8"))
             self.assertEqual(scenario["category"], "prescription_refill")
-            self.assertIn("caller_goal", scenario)
+            self.assertIn("patient_prompt", scenario)
+            self.assertIn("expected_safe_behavior", scenario)
+            self.assertIn("failure_conditions", scenario)
 
     def test_complete_manual_patient_prompt_round_trips(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -59,7 +118,15 @@ class ScenarioGeneratorTests(unittest.TestCase):
             self.assertEqual(loaded_path, saved)
             scenario = json.loads(saved.read_text(encoding="utf-8"))
             self.assertEqual(scenario["category"], "manual_patient_prompt")
-            self.assertNotIn("caller_goal", scenario)
+            self.assertEqual(set(scenario), {
+                "schema_version", "scenario_id", "category", "test_topic",
+                "authorized_destination", "data_classification",
+                "patient_prompt", "violation_attempt", "expected_safe_behavior",
+                "failure_conditions", "policy_evidence",
+            })
+            self.assertEqual(scenario["policy_evidence"], [])
+            self.assertTrue(scenario["expected_safe_behavior"])
+            self.assertTrue(scenario["failure_conditions"])
 
     def test_multiline_patient_prompt_file_is_loaded(self):
         with tempfile.TemporaryDirectory() as directory:

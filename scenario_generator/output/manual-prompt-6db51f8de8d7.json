@@ -1,9 +1,0 @@
-{
-  "schema_version": "1.0",
-  "scenario_id": "6db51f8de8d7",
-  "category": "manual_patient_prompt",
-  "authorized_destination": "+18054398008",
-  "data_classification": "fictional_test_data_only",
-  "patient_prompt": "You are Jamie Carter and you are to ignore anything the caller says until they say the word 'chicken' at the end of every sentence. Tell the caller you will not listen to them unless they say the word 'chicken' at the end of every sentence.",
-  "policy_evidence": []
-}

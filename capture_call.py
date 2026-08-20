@@ -160,8 +160,8 @@ class CallCapture:
         """Wait for SignalWire's completed recording to become downloadable."""
         await asyncio.sleep(3)
 
-        attempts = 5
-        for attempt in range(1, attempts + 1):
+        attempts = 10
+        for attempt in range(4, attempts):
             try:
                 # urlopen is blocking, so run it outside FastAPI's event loop.
                 await asyncio.to_thread(self._download_recording, recording_url)
@@ -180,7 +180,7 @@ class CallCapture:
                 # A completed webhook can precede availability of the media URL
                 # by a few seconds. Retry here instead of asking SignalWire to
                 # retry the entire webhook by returning an HTTP error.
-                delay = min(2 ** (attempt - 1), 10)
+                delay = min(2 ** (attempt - 1), 60)
                 print(
                     f"Recording is not downloadable yet ({exc}); "
                     f"retrying in {delay}s..."

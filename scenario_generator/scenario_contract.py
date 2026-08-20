@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 AUTHORIZED_DESTINATION = "+18054398008"
-DEFAULT_OUTPUT_DIRECTORY = Path(__file__).resolve().parents[1] / "input"
+DEFAULT_OUTPUT_DIRECTORY = Path(__file__).resolve().parents[1] / "generated_prompt"
 
 
 def newest_scenario(directory: Path = DEFAULT_OUTPUT_DIRECTORY) -> Path:

@@ -14,6 +14,8 @@ import json
 import os
 import secrets
 import ssl
+import sys
+import termios
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -37,6 +39,7 @@ from scenario_generator.generate import (
     generate_scenario,
     save_scenario,
 )
+from scenario_generator.call_controls import contains_ctrl_t
 from scenario_generator.scenario_contract import (
     load_patient_prompt,
     read_patient_prompt_file,
@@ -54,11 +57,6 @@ MAX_CALL_SECONDS = int(os.getenv("MAX_CALL_SECONDS", "180"))
 # Require a meaningful quiet gap before handing the conversational floor over.
 OFFICE_VAD_SILENCE_MS = int(os.getenv("OFFICE_VAD_SILENCE_MS", "1000"))
 OFFICE_TURN_SETTLE_MS = int(os.getenv("OFFICE_TURN_SETTLE_MS", "900"))
-DEFAULT_PATIENT_PROMPT_FILE = (
-    Path(__file__).resolve().parent / "input" / "patient_prompt_default.txt"
-)
-
-
 def runtime_options() -> argparse.Namespace:
     """Parse RAG and manual execution options while tolerating importer arguments."""
     parser = argparse.ArgumentParser(
@@ -133,10 +131,12 @@ if _runtime_options.rag:
     PATIENT_PROMPT, SCENARIO_JSON_PATH = load_patient_prompt(SCENARIO_JSON_PATH)
     print(f"RAG scenario saved: {SCENARIO_JSON_PATH}", flush=True)
 else:
-    # Without an explicit manual override, load the editable default prompt.
-    _patient_prompt = manual_prompt_override(
-        _runtime_options
-    ) or read_patient_prompt_file(DEFAULT_PATIENT_PROMPT_FILE)
+    _patient_prompt = manual_prompt_override(_runtime_options)
+    if not _patient_prompt:
+        raise SystemExit(
+            "Manual mode requires --patient-prompt-file custom_input/<file>.txt "
+            "or --patient-prompt. Use --rag for a generated RAG scenario."
+        )
     SCENARIO_JSON_PATH = generate_manual_patient_prompt(_patient_prompt)
     PATIENT_PROMPT, SCENARIO_JSON_PATH = load_patient_prompt(SCENARIO_JSON_PATH)
 
@@ -199,6 +199,9 @@ capture = CallCapture(
     TEST_NUMBER,
     SCENARIO_TOPIC,
 )
+active_call_sid: str | None = None
+call_started = asyncio.Event()
+uvicorn_server: uvicorn.Server | None = None
 
 
 def required_env(name: str) -> str:
@@ -255,6 +258,66 @@ async def end_call_after_timeout(call_sid: str) -> None:
         print(f"Could not end call automatically: {exc}")
 
 
+async def end_active_call_from_keyboard() -> None:
+    """End the live call on Ctrl+T, then wait for captured artifacts."""
+    if not sys.stdin.isatty():
+        print("Ctrl+T early termination unavailable: stdin is not a terminal.")
+        return
+
+    loop = asyncio.get_running_loop()
+    input_ready = asyncio.Event()
+    input_buffer: list[str] = []
+    file_descriptor = sys.stdin.fileno()
+    original_settings = termios.tcgetattr(file_descriptor)
+    control_settings = termios.tcgetattr(file_descriptor)
+    # Read individual keys without echo so Ctrl+T reaches this process at once.
+    control_settings[0] &= ~(termios.IXON | termios.IXOFF)
+    control_settings[3] &= ~(termios.ICANON | termios.ECHO)
+    control_settings[6][termios.VMIN] = 1
+    control_settings[6][termios.VTIME] = 0
+
+    def read_terminal_input() -> None:
+        data = os.read(file_descriptor, 32).decode("utf-8", errors="ignore")
+        input_buffer.append(data)
+        input_ready.set()
+
+    termios.tcsetattr(file_descriptor, termios.TCSANOW, control_settings)
+    loop.add_reader(file_descriptor, read_terminal_input)
+    print("Press Ctrl+T to end the call early and finalize its artifacts.")
+    try:
+        while True:
+            await input_ready.wait()
+            input_ready.clear()
+            data = "".join(input_buffer)
+            input_buffer.clear()
+            if contains_ctrl_t(data):
+                break
+
+        print("Ctrl+T received; ending the active call...", flush=True)
+        await call_started.wait()
+        if active_call_sid is None:
+            print("No active SignalWire call was available to terminate.")
+            return
+        await asyncio.to_thread(
+            signalwire_client().calls(active_call_sid).update,
+            status="completed",
+        )
+        print(
+            "Call ended. Waiting for SignalWire to finalize the recording...",
+            flush=True,
+        )
+        await capture.recording_ready.wait()
+        print(f"Transcript saved: {capture.transcript_path}", flush=True)
+        print(f"Recording saved: {capture.recording_path}", flush=True)
+        if uvicorn_server is not None:
+            uvicorn_server.should_exit = True
+    except Exception as exc:
+        print(f"Could not end the call with Ctrl+T: {exc}", flush=True)
+    finally:
+        loop.remove_reader(file_descriptor)
+        termios.tcsetattr(file_descriptor, termios.TCSANOW, original_settings)
+
+
 async def monitor_call_status(call_sid: str) -> None:
     """Detect pre-dial failures even when the public webhook is unreachable."""
     terminal_failures = {"failed", "canceled", "busy", "no-answer"}
@@ -284,6 +347,7 @@ async def monitor_call_status(call_sid: str) -> None:
 
 async def place_call() -> None:
     """Place the outbound call and point SignalWire at this app's cXML route."""
+    global active_call_sid
     # Give Uvicorn time to bind before SignalWire requests the instructions.
     await asyncio.sleep(1)
     cxml_url, _ = public_urls()
@@ -302,6 +366,8 @@ async def place_call() -> None:
         **recording_options,
     )
     print(f"SignalWire call initiated safely: sid={call.sid}, to={TEST_NUMBER}")
+    active_call_sid = call.sid
+    call_started.set()
     print(f"Artifacts will be saved under: {capture.run_dir}")
     asyncio.create_task(end_call_after_timeout(call.sid))
     asyncio.create_task(monitor_call_status(call.sid))
@@ -313,9 +379,12 @@ async def lifespan(_: FastAPI):
     capture.initialize()
     print(f"Patient prompt loaded from: {SCENARIO_JSON_PATH}")
     call_task = asyncio.create_task(place_call())
+    keyboard_task = asyncio.create_task(end_active_call_from_keyboard())
     yield
     if not call_task.done():
         call_task.cancel()
+    if not keyboard_task.done():
+        keyboard_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -394,7 +463,7 @@ async def media_stream(signalwire_ws: WebSocket) -> None:
                                 "create_response": False,
                                 # The remote endpoint is another voice bot. Do not
                                 # let its early VAD response cancel our sentence.
-                                "interrupt_response": False,
+                                "interrupt_response": True,
                             },
                         },
                         "output": {
@@ -614,4 +683,6 @@ if __name__ == "__main__":
 
     print("Using prompt: ", PATIENT_PROMPT)
 
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    config = uvicorn.Config(app, host="0.0.0.0", port=PORT)
+    uvicorn_server = uvicorn.Server(config)
+    uvicorn_server.run()

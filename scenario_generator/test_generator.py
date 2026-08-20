@@ -9,6 +9,7 @@ from generate import (
     DEFAULT_INDEX,
     DEFAULT_OUTPUT,
     RANDOM_TOPICS,
+    choose_diverse_topic,
     generate_manual_patient_prompt,
     generate_random_scenario,
     generate_scenario,
@@ -19,9 +20,16 @@ from scenario_contract import (
     read_patient_prompt_file,
 )
 from naming import build_run_directory_name
+from call_controls import contains_ctrl_t
 
 
 class ScenarioGeneratorTests(unittest.TestCase):
+    def test_ctrl_t_detection_uses_the_terminal_control_character(self):
+        self.assertTrue(contains_ctrl_t("abc\x14def"))
+        self.assertFalse(contains_ctrl_t("t"))
+        self.assertFalse(contains_ctrl_t("CTRL+T"))
+        self.assertFalse(contains_ctrl_t("\x11"))
+
     def test_run_directory_name_uses_short_id_and_readable_safe_topic(self):
         name = build_run_directory_name(
             "Authorization/referral status: approval?",
@@ -38,31 +46,62 @@ class ScenarioGeneratorTests(unittest.TestCase):
         self.assertEqual(identifier, "12345678")
         self.assertLessEqual(len(topic), 80)
 
-    def test_default_scenario_destination_is_repository_input(self):
-        self.assertEqual(DEFAULT_OUTPUT, Path(__file__).resolve().parents[1] / "input")
+    def test_default_scenario_destination_is_generated_prompt(self):
+        self.assertEqual(
+            DEFAULT_OUTPUT,
+            Path(__file__).resolve().parents[1] / "generated_prompt",
+        )
 
     def test_every_extracted_scenario_topic_generates_a_specialized_profile(self):
         expected_categories = {
+            "demographic_correction",
+            "minimum_necessary_forms",
             "patient_registration",
             "appointment_change",
+            "double_booking_authority",
+            "scheduling_triage_duration",
             "payment_policy",
+            "urgent_access_payment",
             "late_arrival_no_show",
+            "patient_abandonment",
             "directions",
             "general_policy",
             "clinical_question",
+            "callback_followthrough",
             "results_or_clinical_advice",
             "prescription_refill",
             "authorization_referral",
             "formulary_pharmacy",
             "repeat_caller",
             "privacy_access",
+            "secure_portal_access",
+            "terminated_workforce_access",
+            "provider_identifier_security",
+            "privacy_incident_response",
+            "compliance_investigator_verification",
             "privacy_complaint",
+            "complaint_rescheduling_retaliation",
             "notice_of_privacy_practices",
+            "revised_privacy_notice",
+            "diagnosis_code_integrity",
         }
         generated_categories = {
             generate_scenario(topic)["category"] for topic in RANDOM_TOPICS
         }
         self.assertEqual(generated_categories, expected_categories)
+
+    def test_random_topic_avoids_recent_rag_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            recently_used = RANDOM_TOPICS[:10]
+            for position, topic in enumerate(recently_used):
+                path = output / f"history-{position}.json"
+                path.write_text(json.dumps({"test_topic": topic}), encoding="utf-8")
+
+            with patch("generate.secrets.choice", side_effect=lambda values: values[0]):
+                selected = choose_diverse_topic(output, recent_window=10)
+
+            self.assertNotIn(selected, recently_used)
 
     def test_refill_scenario_is_grounded_and_compact(self):
         scenario = generate_scenario("prescription refill request")
@@ -107,6 +146,23 @@ class ScenarioGeneratorTests(unittest.TestCase):
             self.assertIn("expected_safe_behavior", scenario)
             self.assertIn("failure_conditions", scenario)
 
+    def test_rag_generation_never_writes_to_custom_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            custom_input = root / "custom_input"
+            generated_prompt = root / "generated_prompt"
+            custom_input.mkdir()
+            with patch(
+                "generate.secrets.choice",
+                return_value="prescription refill request",
+            ):
+                generated = generate_random_scenario(
+                    output_directory=generated_prompt
+                )
+
+            self.assertEqual(generated.parent, generated_prompt.resolve())
+            self.assertEqual(list(custom_input.iterdir()), [])
+
     def test_complete_manual_patient_prompt_round_trips(self):
         with tempfile.TemporaryDirectory() as directory:
             supplied = "You are a fictional caller. Ask twice, then stop.\nWait for a greeting."
@@ -127,6 +183,32 @@ class ScenarioGeneratorTests(unittest.TestCase):
             self.assertEqual(scenario["policy_evidence"], [])
             self.assertTrue(scenario["expected_safe_behavior"])
             self.assertTrue(scenario["failure_conditions"])
+
+    def test_custom_txt_flows_into_complete_generated_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            custom_input = root / "custom_input"
+            generated_prompt = root / "generated_prompt"
+            custom_input.mkdir()
+            source = custom_input / "my_test.txt"
+            source.write_text(
+                "You are a fictional caller. Ask once, then stop.\n",
+                encoding="utf-8",
+            )
+
+            saved = generate_manual_patient_prompt(
+                read_patient_prompt_file(source),
+                output_directory=generated_prompt,
+            )
+            loaded_prompt, loaded_path = load_patient_prompt(saved)
+
+            self.assertEqual(saved.parent, generated_prompt.resolve())
+            self.assertTrue(saved.name.startswith("manual_patient_prompt-"))
+            self.assertEqual(
+                loaded_prompt,
+                "You are a fictional caller. Ask once, then stop.",
+            )
+            self.assertEqual(loaded_path, saved)
 
     def test_multiline_patient_prompt_file_is_loaded(self):
         with tempfile.TemporaryDirectory() as directory:

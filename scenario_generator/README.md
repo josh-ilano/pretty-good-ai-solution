@@ -122,7 +122,7 @@ If the policy index needs to be rebuilt:
 ```bash
 python3 -m pip install -r rag_pipeline/requirements.txt
 python3 rag_pipeline/ingest.py \
-  output/pdf/medical_practice_call_workflows_rag_extract.pdf
+  rag_pipeline/documents/medical_practice_call_workflows_rag_extract.pdf
 ```
 
 Test retrieval directly with:

@@ -18,7 +18,7 @@ python -m pip install -r rag_pipeline/requirements.txt
 
 ```bash
 python rag_pipeline/ingest.py \
-  output/pdf/medical_practice_call_workflows_rag_extract.pdf
+  rag_pipeline/documents/medical_practice_call_workflows_rag_extract.pdf
 ```
 
 By default, artifacts are written to `rag_pipeline/data/`. Re-running ingestion
@@ -46,4 +46,3 @@ Each JSONL record contains:
 
 The original filtered PDF declares source pages `36-45, 64-67, 125`; ingestion
 uses this metadata to retain those page references.
-

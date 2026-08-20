@@ -12,7 +12,6 @@ import asyncio
 import base64
 import json
 import os
-import secrets
 import ssl
 import sys
 import termios
@@ -34,7 +33,7 @@ from scenario_generator.generate import (
     AUTHORIZED_DESTINATION,
     DEFAULT_INDEX,
     DEFAULT_OUTPUT,
-    RANDOM_TOPICS,
+    choose_diverse_topic,
     generate_manual_patient_prompt,
     generate_scenario,
     save_scenario,
@@ -115,7 +114,7 @@ def manual_prompt_override(args: argparse.Namespace) -> str | None:
 
 _runtime_options = runtime_options()
 if _runtime_options.rag:
-    _rag_topic = secrets.choice(RANDOM_TOPICS)
+    _rag_topic = choose_diverse_topic(DEFAULT_OUTPUT)
     print(f"Random RAG test selected: {_rag_topic}", flush=True)
     _rag_scenario = generate_scenario(
         _rag_topic,

@@ -67,8 +67,11 @@ Use a complete prompt stored in `custom_input/`:
 
 ```bash
 python realtime_call.py \
-  --patient-prompt-file custom_input/normal_input.txt
+  --patient-prompt-file custom_input/fake_patient.txt
 ```
+
+For convenience, `--patient-prompt custom_input/fake_patient.txt` also detects
+and reads an existing `.txt` file instead of sending the filename as instructions.
 
 Or supply the complete patient prompt directly:
 
@@ -183,4 +186,3 @@ follow a documented workflow over cosmetic transcript issues.
 - A public AI-assisted debugging screen recording
 - The single originating phone number used for every test call, in E.164 format
 - No committed secrets or `.env` file
-

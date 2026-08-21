@@ -18,6 +18,7 @@ from scenario_contract import (
     load_adversarial_goal,
     load_patient_prompt,
     read_patient_prompt_file,
+    resolve_patient_prompt_value,
 )
 from naming import build_run_directory_name
 from call_controls import contains_ctrl_t
@@ -221,6 +222,35 @@ class ScenarioGeneratorTests(unittest.TestCase):
                 read_patient_prompt_file(path),
                 "You are a fictional caller.\n\nWait for the greeting.\nAsk once.",
             )
+
+    def test_patient_prompt_value_resolves_existing_txt_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fake_patient.txt"
+            path.write_text(
+                "You are Miguel Herrera, a fictional patient.\nRequest a refill.\n",
+                encoding="utf-8",
+            )
+
+            prompt, source = resolve_patient_prompt_value(str(path))
+
+            self.assertEqual(
+                prompt,
+                "You are Miguel Herrera, a fictional patient.\nRequest a refill.",
+            )
+            self.assertEqual(source, path.resolve())
+
+    def test_patient_prompt_value_preserves_inline_text(self):
+        prompt, source = resolve_patient_prompt_value(
+            "You are a fictional patient requesting a refill."
+        )
+        self.assertEqual(prompt, "You are a fictional patient requesting a refill.")
+        self.assertIsNone(source)
+
+    def test_missing_txt_patient_prompt_value_is_rejected(self):
+        with self.assertRaisesRegex(
+            FileNotFoundError, "Patient prompt file not found"
+        ):
+            resolve_patient_prompt_value("custom_input/does_not_exist.txt")
 
     def test_empty_patient_prompt_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

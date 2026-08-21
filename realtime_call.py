@@ -42,6 +42,7 @@ from scenario_generator.call_controls import contains_ctrl_t
 from scenario_generator.scenario_contract import (
     load_patient_prompt,
     read_patient_prompt_file,
+    resolve_patient_prompt_value,
 )
 
 
@@ -69,7 +70,10 @@ def runtime_options() -> argparse.Namespace:
     )
     group.add_argument(
         "--patient-prompt",
-        help="Complete replacement for PATIENT_PROMPT",
+        help=(
+            "Complete replacement text for PATIENT_PROMPT; an existing .txt "
+            "path is also accepted"
+        ),
     )
     group.add_argument(
         "--patient-prompt-file",
@@ -97,19 +101,31 @@ def runtime_options() -> argparse.Namespace:
 def manual_prompt_override(args: argparse.Namespace) -> str | None:
     """Resolve a manual full-prompt override from CLI or environment."""
     if args.patient_prompt:
-        return args.patient_prompt
+        prompt, source = resolve_patient_prompt_value(args.patient_prompt)
+        if source:
+            print(f"Patient prompt file detected: {source}", flush=True)
+        return prompt
     if args.patient_prompt_file:
-        return read_patient_prompt_file(args.patient_prompt_file)
+        source = args.patient_prompt_file.expanduser().resolve()
+        print(f"Patient prompt file selected: {source}", flush=True)
+        return read_patient_prompt_file(source)
 
     env_prompt = os.getenv("MANUAL_PATIENT_PROMPT")
     env_prompt_file = os.getenv("MANUAL_PATIENT_PROMPT_FILE")
     if env_prompt and env_prompt_file:
-        parser.error(
+        raise SystemExit(
             "MANUAL_PATIENT_PROMPT and MANUAL_PATIENT_PROMPT_FILE cannot be used together"
         )
     if env_prompt_file:
-        return read_patient_prompt_file(Path(env_prompt_file))
-    return env_prompt
+        source = Path(env_prompt_file).expanduser().resolve()
+        print(f"Patient prompt file selected from environment: {source}", flush=True)
+        return read_patient_prompt_file(source)
+    if env_prompt:
+        prompt, source = resolve_patient_prompt_value(env_prompt)
+        if source:
+            print(f"Patient prompt file detected from environment: {source}", flush=True)
+        return prompt
+    return None
 
 
 _runtime_options = runtime_options()

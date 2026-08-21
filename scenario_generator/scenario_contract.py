@@ -78,3 +78,33 @@ def read_patient_prompt_file(path: Path) -> str:
     if not prompt:
         raise ValueError(f"Patient prompt file is empty: {prompt_path}")
     return prompt
+
+
+def resolve_patient_prompt_value(value: str) -> tuple[str, Path | None]:
+    """Resolve inline prompt text, while accepting an existing .txt path.
+
+    This keeps ``--patient-prompt`` useful for inline text but prevents a common
+    mistake where a filename is sent verbatim to the Realtime API as the system
+    instructions.
+    """
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("Manual patient prompt cannot be empty")
+
+    if "\n" not in cleaned and "\r" not in cleaned and len(cleaned) <= 1024:
+        candidate = Path(cleaned).expanduser()
+        try:
+            if candidate.is_file():
+                resolved = candidate.resolve()
+                return read_patient_prompt_file(resolved), resolved
+        except OSError:
+            # A long or otherwise invalid filesystem-shaped value is still
+            # legitimate inline prompt text.
+            pass
+
+        if candidate.suffix.casefold() == ".txt":
+            raise FileNotFoundError(
+                f"Patient prompt file not found: {candidate.resolve()}"
+            )
+
+    return cleaned, None
